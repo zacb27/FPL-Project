@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}{{ position_name }}s - FPL Vibe{% endblock %}
+
+{% block content %}
+<div class="header-section">
+    <h2>{{ position_name }}s</h2>
+    <p class="subtitle">Detailed analysis of {{ position_name }} players</p>
+    <a href="{{ url_for('index') }}" class="back-link">← Back to Home</a>
+</div>
+
+<!-- Filters -->
+<div class="filters-card">
+    <h3>Filters</h3>
+    <form method="GET" action="{{ url_for('position_page', position_name=position_name) }}" class="filter-form">
+        <div class="form-group">
+            <label for="min_minutes">Minimum Minutes:</label>
+            <input type="number" id="min_minutes" name="min_minutes" value="{{ min_minutes }}" min="0" step="50">
+        </div>
+        <div class="form-group">
+            <label for="max_cost">Max Cost (£):</label>
+            <input type="number" id="max_cost" name="max_cost" value="{{ max_cost or '' }}" min="0" max="15" step="0.5" placeholder="No limit">
+        </div>
+        <div class="form-group">
+            <label for="top_n">Number of Results:</label>
+            <input type="number" id="top_n" name="top_n" value="{{ top_n }}" min="10" max="100" step="5">
+        </div>
+        <button type="submit" class="btn-primary">Apply Filters</button>
+        <a href="{{ url_for('position_page', position_name=position_name) }}" class="btn-secondary">Reset</a>
+    </form>
+</div>
+
+<!-- Players Table -->
+{% if players %}
+<div class="table-container">
+    <table class="players-table">
+        <thead>
+            <tr>
+                {% for key in players[0].keys() %}
+                <th>{{ key.replace('_', ' ').title() }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for player in players %}
+            <tr>
+                {% for key, value in player.items() %}
+                <td>
+                    {% if key == 'Cost' %}
+                        £{{ "%.1f"|format(value|float) }}
+                    {% elif key in ['PPM', 'PPG', 'Points_per_90', 'Goals_per_90', 'Assists_per_90', 'G+A_per_90', 'Clean_Sheets_per_90', 'Saves_per_90'] %}
+                        {% if value is not none and value != '' %}{{ "%.2f"|format(value|float) }}{% else %}-{% endif %}
+                    {% elif key == 'Ownership %' %}
+                        {% if value is not none and value != '' %}{{ "%.1f"|format(value|float) }}%{% else %}-{% endif %}
+                    {% else %}
+                        {{ value if value is not none else '-' }}
+                    {% endif %}
+                </td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="no-data-card">
+    <p>No players found with the specified criteria.</p>
+</div>
+{% endif %}
+{% endblock %}
+
