@@ -6,8 +6,8 @@ import altair as alt
 import plotly.express as px
 
 # --- 1. SETUP & CONFIGURATION ---
-st.set_page_config(page_title="FPL Vibe Scout", layout="wide")
-st.title("⚽ FPL Vibe Scout")
+st.set_page_config(page_title="Jude", layout="wide")
+st.title("⚽ Jude")
 st.markdown("### The 'Moneyball' Dashboard for Fantasy Premier League")
 
 # --- 2. DATA LOADING FUNCTION (Cached for Speed) ---
@@ -237,7 +237,7 @@ df, events_df = load_data()
 
 # --- 3. NAVIGATION MENU ---
 page = st.sidebar.radio(
-    "📍 Navigation",
+    "📍 Jude Navigation",
     ["Home Dashboard", "Player Compare", "League Spy", "Form Tracker"]
 )
 
@@ -247,10 +247,10 @@ df['position'] = df['element_type'].map(pos_map)
 
 if page == "Home Dashboard":
     # Smart search input
-    query = st.text_input("💡 Ask the Scout (e.g., 'Best MID under 6.0')", "")
+    query = st.text_input("💡 Ask Jude (e.g., 'Best MID under 6.0')", "")
 
     # Sidebar filters
-    st.sidebar.header("🎯 Scout Filters")
+st.sidebar.header("🎯 Jude Filters")
     min_minutes = st.sidebar.slider("Min Minutes Played", 0, 3000, 500)
     max_price = st.sidebar.slider("Max Price (£)", 4.0, 15.0, 15.0)
     positions = st.sidebar.multiselect(
@@ -459,7 +459,7 @@ elif page == "Player Compare":
 
 elif page == "League Spy":
     st.header("🕵️ League Spy")
-    st.caption("Peek into any classic league and see how the leaders are doing.")
+st.caption("Peek into any classic league and see how the leaders are doing with Jude.")
 
     league_id = st.text_input("League ID", "314")
 
