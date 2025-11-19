@@ -1,9 +1,3 @@
-@st.cache_data
-def fetch_player_history(player_id):
-    url = f"https://fantasy.premierleague.com/api/element-summary/{player_id}/"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
 import streamlit as st
 import pandas as pd
 import requests
@@ -74,6 +68,14 @@ def load_data():
     elements_df['next_3_fixtures'] = elements_df['team'].map(next_fixture_map).fillna("No fixtures scheduled")
 
     return elements_df
+
+
+@st.cache_data
+def fetch_player_history(player_id):
+    url = f"https://fantasy.premierleague.com/api/element-summary/{player_id}/"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
 # Helper: Smart search parser
 def apply_smart_search(query_text, data):
