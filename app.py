@@ -1,7 +1,15 @@
+@st.cache_data
+def fetch_player_history(player_id):
+    url = f"https://fantasy.premierleague.com/api/element-summary/{player_id}/"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 import streamlit as st
 import pandas as pd
 import requests
 import re
+import altair as alt
+import plotly.express as px
 
 # --- 1. SETUP & CONFIGURATION ---
 st.set_page_config(page_title="FPL Vibe Scout", layout="wide")
@@ -114,113 +122,272 @@ def format_filter_message(filters):
 # Load the data
 df = load_data()
 
-# --- 3. SMART SEARCH + SIDEBAR FILTERS ---
-query = st.text_input("💡 Ask the Scout (e.g., 'Best MID under 6.0')", "")
-
-st.sidebar.header("🎯 Scout Filters")
-min_minutes = st.sidebar.slider("Min Minutes Played", 0, 3000, 500)
-max_price = st.sidebar.slider("Max Price (£)", 4.0, 15.0, 15.0)
-positions = st.sidebar.multiselect(
-    "Positions", 
-    ['GKP', 'DEF', 'MID', 'FWD'], 
-    default=['MID', 'FWD']
+# --- 3. NAVIGATION MENU ---
+page = st.sidebar.radio(
+    "📍 Navigation",
+    ["Home Dashboard", "Player Compare", "League Spy", "Form Tracker"]
 )
 
 # Map API position IDs (1=GKP, 2=DEF, 3=MID, 4=FWD)
 pos_map = {1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD'}
 df['position'] = df['element_type'].map(pos_map)
 
-# Apply Filters
-filtered_df = df[
-    (df['minutes'] >= min_minutes) &
-    (df['cost'] <= max_price) &
-    (df['position'].isin(positions))
-]
+if page == "Home Dashboard":
+    # Smart search input
+    query = st.text_input("💡 Ask the Scout (e.g., 'Best MID under 6.0')", "")
 
-display_df = filtered_df
-if query.strip():
-    display_df, applied = apply_smart_search(query, df)
-    if applied:
-        st.success("Showing " + format_filter_message(applied))
-    else:
-        st.info("No matching filters detected. Showing all players.")
-
-# --- 4. THE VISUALS ---
-
-# Tab Layout
-tab1, tab2 = st.tabs(["📊 Moneyball Chart", "🏆 Dream Team Builder"])
-
-with tab1:
-    st.subheader("Value vs. Performance")
-    
-    # Simple Scatter Plot
-    st.scatter_chart(
-        display_df,
-        x='cost',
-        y='total_points',
-        color='position',
-        size='ppm',
-        use_container_width=True
-    )
-    
-    # The Data Table with Images
-    st.subheader("Top Value Picks")
-    display_cols = ['photo_url', 'web_name', 'team_name', 'position', 'cost', 'total_points', 'ppm', 'next_3_fixtures']
-    
-    st.dataframe(
-        display_df[display_cols].sort_values('ppm', ascending=False).head(50),
-        column_config={
-            "photo_url": st.column_config.ImageColumn("Player", width="small"),
-            "ppm": st.column_config.NumberColumn("Points per Million", format="%.2f"),
-            "cost": st.column_config.NumberColumn("Price", format="£%.1f"),
-            "next_3_fixtures": st.column_config.TextColumn("Next 3 Fixtures"),
-        },
-        use_container_width=True,
-        hide_index=True
+    # Sidebar filters
+    st.sidebar.header("🎯 Scout Filters")
+    min_minutes = st.sidebar.slider("Min Minutes Played", 0, 3000, 500)
+    max_price = st.sidebar.slider("Max Price (£)", 4.0, 15.0, 15.0)
+    positions = st.sidebar.multiselect(
+        "Positions",
+        ['GKP', 'DEF', 'MID', 'FWD'],
+        default=['MID', 'FWD']
     )
 
-with tab2:
-    st.subheader("🤖 Auto-Pick Dream Team")
-    
-    budget = st.slider("Team Budget (£m)", 80.0, 105.0, 100.0)
-    formation = st.selectbox("Formation", ["3-4-3", "3-5-2", "4-4-2", "4-3-3"])
-    
-    if st.button("Generate Team"):
-        # Parse formation
-        defs, mids, fwds = map(int, formation.split("-"))
-        gkps = 1
-        
-        # Simple Greedy Algorithm
-        dream_team = []
-        current_cost = 0
-        
-        # Helper function to pick best players
-        def pick_best(pos_name, count, current_team):
-            available = df[df['position'] == pos_name].sort_values('total_points', ascending=False)
-            picked = []
-            for _, player in available.iterrows():
-                if len(picked) < count:
-                    picked.append(player)
-            return picked
+    # Apply filters
+    filtered_df = df[
+        (df['minutes'] >= min_minutes) &
+        (df['cost'] <= max_price) &
+        (df['position'].isin(positions))
+    ]
 
-        # Pick the squad
-        squad = []
-        squad += pick_best('GKP', gkps, squad)
-        squad += pick_best('DEF', defs, squad)
-        squad += pick_best('MID', mids, squad)
-        squad += pick_best('FWD', fwds, squad)
-        
-        squad_df = pd.DataFrame(squad)
-        
-        # Display
-        total_points = squad_df['total_points'].sum()
-        total_cost = squad_df['cost'].sum()
-        
-        col1, col2 = st.columns(2)
-        col1.metric("Projected Points", int(total_points))
-        col2.metric("Total Cost", f"£{total_cost:.1f}m", delta=f"{budget - total_cost:.1f}m left")
-        
+    display_df = filtered_df
+    if query.strip():
+        display_df, applied = apply_smart_search(query, df)
+        if applied:
+            st.success("Showing " + format_filter_message(applied))
+        else:
+            st.info("No matching filters detected. Showing all players.")
+
+    # Tabs for dashboard
+    tab1, tab2 = st.tabs(["📊 Moneyball Chart", "🏆 Dream Team Builder"])
+
+    with tab1:
+        st.subheader("Value vs. Performance")
+
+        # Interactive scatter plot
+        if not display_df.empty:
+            scatter_data = display_df.copy()
+            chart = (
+                alt.Chart(scatter_data)
+                .mark_circle(opacity=0.8)
+                .encode(
+                    x=alt.X('cost', title='Price (£m)'),
+                    y=alt.Y('total_points', title='Total Points'),
+                    color=alt.Color('position', title='Position'),
+                    size=alt.Size('ppm', title='Points per Million', scale=alt.Scale(range=[50, 500])),
+                    tooltip=[
+                        alt.Tooltip('web_name', title='Player'),
+                        alt.Tooltip('team_name', title='Team'),
+                        alt.Tooltip('position', title='Position'),
+                        alt.Tooltip('cost', title='Price (£m)', format='.1f'),
+                        alt.Tooltip('total_points', title='Points'),
+                        alt.Tooltip('ppm', title='PPM', format='.2f'),
+                        alt.Tooltip('next_3_fixtures', title='Next 3 Fixtures')
+                    ]
+                )
+                .properties(height=450)
+                .interactive()
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("No players match the selected criteria.")
+
+        # Data table
+        st.subheader("Top Value Picks")
+        display_cols = ['photo_url', 'web_name', 'team_name', 'position', 'cost', 'total_points', 'ppm', 'next_3_fixtures']
+
         st.dataframe(
-            squad_df[['web_name', 'position', 'team_name', 'total_points', 'cost']],
-            use_container_width=True
+            display_df[display_cols].sort_values('ppm', ascending=False).head(50),
+            column_config={
+                "photo_url": st.column_config.ImageColumn("Player", width="small"),
+                "ppm": st.column_config.NumberColumn("Points per Million", format="%.2f"),
+                "cost": st.column_config.NumberColumn("Price", format="£%.1f"),
+                "next_3_fixtures": st.column_config.TextColumn("Next 3 Fixtures"),
+            },
+            use_container_width=True,
+            hide_index=True
         )
+
+    with tab2:
+        st.subheader("🤖 Auto-Pick Dream Team")
+
+        budget = st.slider("Team Budget (£m)", 80.0, 105.0, 100.0)
+        formation = st.selectbox("Formation", ["3-4-3", "3-5-2", "4-4-2", "4-3-3"])
+
+        if st.button("Generate Team"):
+            defs, mids, fwds = map(int, formation.split("-"))
+            gkps = 1
+
+            def pick_best(pos_name, count, current_team):
+                available = df[df['position'] == pos_name].sort_values('total_points', ascending=False)
+                picked = []
+                for _, player in available.iterrows():
+                    if len(picked) < count:
+                        picked.append(player)
+                return picked
+
+            squad = []
+            squad += pick_best('GKP', gkps, squad)
+            squad += pick_best('DEF', defs, squad)
+            squad += pick_best('MID', mids, squad)
+            squad += pick_best('FWD', fwds, squad)
+
+            squad_df = pd.DataFrame(squad)
+
+            total_points = squad_df['total_points'].sum()
+            total_cost = squad_df['cost'].sum()
+
+            col1, col2 = st.columns(2)
+            col1.metric("Projected Points", int(total_points))
+            col2.metric("Total Cost", f"£{total_cost:.1f}m", delta=f"{budget - total_cost:.1f}m left")
+
+            st.dataframe(
+                squad_df[['web_name', 'position', 'team_name', 'total_points', 'cost']],
+                use_container_width=True
+            )
+
+elif page == "Player Compare":
+    st.header("🔍 Player Compare")
+    st.caption("Pick two players to compare their advanced metrics.")
+
+    compare_choices = st.multiselect(
+        "Select exactly two players",
+        options=df['web_name'].sort_values().unique(),
+        max_selections=2
+    )
+
+    if len(compare_choices) == 2:
+        compare_df = df[df['web_name'].isin(compare_choices)].copy()
+        radar_metrics = ['creativity', 'influence', 'threat', 'ict_index', 'points_per_game']
+
+        # Ensure numeric and normalize 0-100
+        metric_values = compare_df[radar_metrics].apply(pd.to_numeric, errors='coerce').fillna(0)
+        min_vals = metric_values.min()
+        max_vals = metric_values.max()
+        ranges = (max_vals - min_vals).replace(0, 1)
+        normalized = ((metric_values - min_vals) / ranges * 100).fillna(0)
+        normalized['web_name'] = compare_df['web_name'].values
+
+        radar_data = normalized.melt(id_vars='web_name', var_name='Metric', value_name='Value')
+
+        fig = px.line_polar(
+            radar_data,
+            r='Value',
+            theta='Metric',
+            color='web_name',
+            line_close=True,
+            markers=True,
+            range_r=[0, 100],
+            template='plotly_dark'
+        )
+        fig.update_traces(fill='toself', opacity=0.4)
+        st.plotly_chart(fig, use_container_width=True)
+
+        compare_summary = compare_df[['web_name', 'now_cost', 'selected_by_percent', 'total_points']].copy()
+        compare_summary['now_cost'] = compare_summary['now_cost'] / 10
+        compare_summary = compare_summary.rename(columns={
+            'web_name': 'Player',
+            'now_cost': 'Price (£m)',
+            'selected_by_percent': 'Ownership %',
+            'total_points': 'Points'
+        })
+        st.dataframe(compare_summary.reset_index(drop=True), use_container_width=True)
+    else:
+        st.info("Select two players above to compare their stats.")
+
+elif page == "League Spy":
+    st.header("🕵️ League Spy")
+    st.caption("Peek into any classic league and see how the leaders are doing.")
+
+    league_id = st.text_input("League ID", "314")
+
+    if st.button("Analyze League"):
+        standings_url = f"https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/"
+        try:
+            response = requests.get(standings_url, timeout=10)
+            response.raise_for_status()
+            league_data = response.json()
+            standings = league_data.get('standings', {}).get('results', [])
+
+            if standings:
+                standings_df = pd.DataFrame(standings)[['rank', 'player_name', 'entry_name', 'total']]
+                standings_df = standings_df.rename(columns={
+                    'rank': 'Rank',
+                    'player_name': 'Player Name',
+                    'entry_name': 'Team Name',
+                    'total': 'Total Points'
+                })
+
+                top10_points = standings_df.head(10)['Total Points']
+                avg_points = top10_points.mean() if not top10_points.empty else 0
+
+                col1, col2 = st.columns(2)
+                col1.metric("Top 10 Avg Points", f"{avg_points:.1f}")
+                col2.metric("Teams Analyzed", len(standings_df))
+
+                st.dataframe(standings_df, use_container_width=True, hide_index=True)
+            else:
+                st.warning("No standings data found for this league.")
+        except requests.RequestException as e:
+            st.error(f"Failed to load league data: {e}")
+        except ValueError:
+            st.error("Unable to parse league data.")
+
+elif page == "Form Tracker":
+    st.header("📈 Form Tracker")
+    st.caption("Track recent gameweek form for your shortlisted players.")
+
+    player_options = df[['id', 'web_name']].drop_duplicates().sort_values('web_name')
+    selected_players = st.multiselect(
+        "Select up to five players",
+        options=player_options['web_name'],
+        default=[],
+        max_selections=5
+    )
+
+    show_cumulative = st.checkbox("Show Cumulative Points", value=False)
+
+    if selected_players:
+        histories = []
+        for name in selected_players:
+            player_row = player_options[player_options['web_name'] == name].iloc[0]
+            player_id = player_row['id']
+            try:
+                summary = fetch_player_history(player_id)
+                history = summary.get('history', [])
+                if history:
+                    hist_df = pd.DataFrame(history)[['round', 'total_points']].rename(columns={
+                        'round': 'Gameweek',
+                        'total_points': 'Points'
+                    })
+                    hist_df['Player'] = name
+                    histories.append(hist_df)
+            except requests.RequestException as e:
+                st.error(f"Failed to fetch history for {name}: {e}")
+
+        if histories:
+            form_df = pd.concat(histories, ignore_index=True)
+            if show_cumulative:
+                form_df['Points'] = form_df.sort_values('Gameweek').groupby('Player')['Points'].cumsum()
+
+            chart = (
+                alt.Chart(form_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X('Gameweek:O', title='Gameweek'),
+                    y=alt.Y('Points:Q', title='Cumulative Points' if show_cumulative else 'Points'),
+                    color='Player:N',
+                    tooltip=['Player', 'Gameweek', 'Points']
+                )
+                .properties(height=450)
+                .interactive()
+            )
+            st.altair_chart(chart, use_container_width=True)
+            st.dataframe(form_df.sort_values(['Player', 'Gameweek']), use_container_width=True)
+        else:
+            st.info("No history data available for the selected players.")
+    else:
+        st.info("Select players above to view their form.")
