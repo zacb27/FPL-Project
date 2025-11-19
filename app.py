@@ -176,7 +176,7 @@ if page == "Home Dashboard":
                 alt.Chart(scatter_data)
                 .mark_circle(opacity=0.8)
                 .encode(
-                    x=alt.X('cost', title='Price (£m)'),
+                    x=alt.X('cost', title='Price (£m)', scale=alt.Scale(domain=[3.5, 15])),
                     y=alt.Y('total_points', title='Total Points'),
                     color=alt.Color('position', title='Position'),
                     size=alt.Size('ppm', title='Points per Million', scale=alt.Scale(range=[50, 500])),
