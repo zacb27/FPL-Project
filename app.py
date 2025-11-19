@@ -20,16 +20,24 @@ def load_data():
     # Create DataFrames
     elements_df = pd.DataFrame(json_data['elements'])
     teams_df = pd.DataFrame(json_data['teams'])
+    events_df = pd.DataFrame(json_data['events'])
     
     # Map Team Names (The ID in elements matches ID in teams)
     team_id_to_name = teams_df.set_index('id')['name'].to_dict()
     team_id_to_short = teams_df.set_index('id')['short_name'].to_dict()
+    strength_home = teams_df.set_index('id')['strength_overall_home'].to_dict()
+    strength_away = teams_df.set_index('id')['strength_overall_away'].to_dict()
+    strength_values = list(strength_home.values()) + list(strength_away.values())
+    min_strength = min(strength_values) if strength_values else 0
+    max_strength = max(strength_values) if strength_values else 1
     elements_df['team_name'] = elements_df['team'].map(team_id_to_name)
+    elements_df['team_short'] = elements_df['team'].map(team_id_to_short)
     
     # Calculate Metrics
     elements_df['cost'] = elements_df['now_cost'] / 10
     elements_df['ppm'] = elements_df['total_points'] / elements_df['cost']
     elements_df['ppm'] = elements_df['ppm'].fillna(0)  # Handle zeros
+    elements_df['points_per_game'] = pd.to_numeric(elements_df['points_per_game'], errors='coerce').fillna(0)
     
     # Create player photo URLs
     photo_ids = elements_df['photo'].str.replace(".jpg", "", regex=False)
@@ -47,6 +55,7 @@ def load_data():
     fixtures_df = pd.DataFrame(fixtures_data)
 
     next_fixture_map = {}
+    fixture_ease_map = {}
     if not fixtures_df.empty:
         upcoming_fixtures = fixtures_df[fixtures_df['finished'] == False].copy()
         if not upcoming_fixtures.empty:
@@ -57,22 +66,44 @@ def load_data():
                     (upcoming_fixtures['team_h'] == team_id) | (upcoming_fixtures['team_a'] == team_id)
                 ].head(3)
                 fixtures_list = []
+                difficulty_values = []
                 for _, fixture in team_fixtures.iterrows():
                     if fixture['team_h'] == team_id:
                         opponent = team_id_to_short.get(fixture['team_a'], 'UNK')
+                        opponent_strength = strength_away.get(fixture['team_a'], (min_strength + max_strength) / 2)
                         fixtures_list.append(f"vs {opponent} (H)")
+                        difficulty_values.append(opponent_strength)
                     else:
                         opponent = team_id_to_short.get(fixture['team_h'], 'UNK')
+                        opponent_strength = strength_home.get(fixture['team_h'], (min_strength + max_strength) / 2)
                         fixtures_list.append(f"@ {opponent} (A)")
+                        difficulty_values.append(opponent_strength)
                 next_fixture_map[team_id] = ", ".join(fixtures_list) if fixtures_list else "No fixtures scheduled"
+                if difficulty_values:
+                    avg_strength = sum(difficulty_values) / len(difficulty_values)
+                    strength_range = max_strength - min_strength if max_strength != min_strength else 1
+                    normalized_ease = 1 - ((avg_strength - min_strength) / strength_range)
+                    fixture_ease_map[team_id] = max(0, min(1, normalized_ease))
+                else:
+                    fixture_ease_map[team_id] = 0.5
     elements_df['next_3_fixtures'] = elements_df['team'].map(next_fixture_map).fillna("No fixtures scheduled")
+    elements_df['fixture_ease_score'] = elements_df['team'].map(fixture_ease_map).fillna(0.5)
+    elements_df['fixture_difficulty_rating'] = elements_df['points_per_game'] * (1 + elements_df['fixture_ease_score'])
 
-    return elements_df
+    return elements_df, events_df
 
 
 @st.cache_data
 def fetch_player_history(player_id):
     url = f"https://fantasy.premierleague.com/api/element-summary/{player_id}/"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@st.cache_data
+def fetch_event_live(event_id):
+    url = f"https://fantasy.premierleague.com/api/event/{event_id}/live/"
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     return resp.json()
@@ -121,8 +152,88 @@ def format_filter_message(filters):
         return " and ".join(filters)
     return ", ".join(filters[:-1]) + ", and " + filters[-1]
 
+
+def build_team_of_week(event_id, master_df):
+    try:
+        live_data = fetch_event_live(event_id)
+    except requests.RequestException:
+        return pd.DataFrame()
+
+    live_elements = pd.json_normalize(live_data.get('elements', []))
+    if live_elements.empty or 'stats.total_points' not in live_elements:
+        return pd.DataFrame()
+
+    live_stats = live_elements[['id', 'stats.total_points']].rename(columns={'stats.total_points': 'gw_points'})
+    merged = master_df.merge(live_stats, left_on='id', right_on='id', how='inner')
+
+    lineup_parts = []
+    requirements = {'GKP': 1, 'DEF': 4, 'MID': 4, 'FWD': 3}
+
+    for pos, count in requirements.items():
+        pos_players = merged[merged['position'] == pos].sort_values('gw_points', ascending=False)
+        if pos_players.empty:
+            continue
+        lineup_parts.append(pos_players.head(count))
+
+    if not lineup_parts:
+        return pd.DataFrame()
+
+    lineup_df = pd.concat(lineup_parts, ignore_index=True)
+    lineup_df = lineup_df[['web_name', 'team_name', 'team_short', 'position', 'gw_points', 'photo_url']]
+    return lineup_df
+
+
+def render_lineup(lineup_df, gameweek):
+    st.caption(f"Best XI from Gameweek {gameweek}")
+
+    def row_display(players_subset):
+        if players_subset.empty:
+            return
+        cols = st.columns(len(players_subset))
+        for col, (_, player) in zip(cols, players_subset.iterrows()):
+            card_html = f"""
+            <div style="
+                background: linear-gradient(145deg, #1a1a1a, #2d0c3d);
+                border-radius: 18px;
+                padding: 16px;
+                text-align: center;
+                color: #ffffff;
+                font-family: 'Inter', sans-serif;
+                box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+            ">
+                <div style="font-size: 0.85rem; color: #b8b8ff; margin-bottom: 8px;">{player['team_short']}</div>
+                <div style="
+                    margin: 0 auto 12px;
+                    width: 70px;
+                    height: 90px;
+                    border-radius: 50% 50% 45% 45%;
+                    background: linear-gradient(180deg, #5b21b6 0%, #7c3aed 100%);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-weight: 600;
+                    letter-spacing: 0.05em;
+                    color: #fff;
+                    border: 2px solid rgba(255,255,255,0.15);
+                ">{player['web_name']}</div>
+                <div style="font-size: 0.9rem; color: #ddd;">{player['position']}</div>
+                <div style="font-size: 1.2rem; font-weight: 700; color: #ffd166;">{player['gw_points']} pts</div>
+            </div>
+            """
+            col.markdown(card_html, unsafe_allow_html=True)
+
+    formation_rows = [
+        lineup_df[lineup_df['position'] == 'GKP'],
+        lineup_df[lineup_df['position'] == 'DEF'],
+        lineup_df[lineup_df['position'] == 'MID'],
+        lineup_df[lineup_df['position'] == 'FWD'],
+    ]
+
+    for row in formation_rows:
+        row_display(row)
+
 # Load the data
-df = load_data()
+df, events_df = load_data()
 
 # --- 3. NAVIGATION MENU ---
 page = st.sidebar.radio(
@@ -212,6 +323,52 @@ if page == "Home Dashboard":
             use_container_width=True,
             hide_index=True
         )
+
+        # Fixture Difficulty Rating Ranking
+        st.subheader("Fixture Difficulty Rating - Next 3 Gameweeks")
+        fdr_cols = [
+            'photo_url',
+            'web_name',
+            'team_name',
+            'position',
+            'points_per_game',
+            'fixture_ease_score',
+            'fixture_difficulty_rating',
+            'next_3_fixtures'
+        ]
+        st.dataframe(
+            display_df[fdr_cols].sort_values('fixture_difficulty_rating', ascending=False).head(25),
+            column_config={
+                "photo_url": st.column_config.ImageColumn("Player", width="small"),
+                "points_per_game": st.column_config.NumberColumn("Points/Game", format="%.2f"),
+                "fixture_ease_score": st.column_config.NumberColumn("Fixture Ease", format="%.2f"),
+                "fixture_difficulty_rating": st.column_config.NumberColumn("Fixture Difficulty Rating", format="%.2f"),
+                "next_3_fixtures": st.column_config.TextColumn("Next 3 Fixtures"),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Team of the Week Section
+        st.subheader("Team of the Week")
+        recent_events = events_df[events_df['finished'] == True].sort_values('id', ascending=False).head(5)
+        if recent_events.empty:
+            st.info("Team of the Week data will be available once the season has progressed.")
+        else:
+            gw_options = recent_events['id'].tolist()
+            gw_display = st.select_slider(
+                "Scroll through the last five Gameweeks",
+                options=gw_options,
+                value=gw_options[0],
+                format_func=lambda gw: f"GW {gw}"
+            )
+            lineup = build_team_of_week(gw_display, df)
+            if lineup.empty:
+                st.warning("Unable to build a team for that gameweek right now.")
+            else:
+                total_points = lineup['gw_points'].sum()
+                st.metric("Total Points", f"{total_points:.0f}")
+                render_lineup(lineup, gw_display)
 
     with tab2:
         st.subheader("🤖 Auto-Pick Dream Team")
