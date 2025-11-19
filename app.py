@@ -1,97 +1,142 @@
-import requests
-import pandas as pd
 import streamlit as st
-import altair as alt
+import pandas as pd
+import requests
 
-@st.cache_data(show_spinner="Loading data...")
-def fetch_fpl_data():
+# --- 1. SETUP & CONFIGURATION ---
+st.set_page_config(page_title="FPL Vibe Scout", layout="wide")
+st.title("⚽ FPL Vibe Scout")
+st.markdown("### The 'Moneyball' Dashboard for Fantasy Premier League")
+
+# --- 2. DATA LOADING FUNCTION (Cached for Speed) ---
+@st.cache_data
+def load_data():
     url = 'https://fantasy.premierleague.com/api/bootstrap-static/'
-    response = requests.get(url)
-    response.raise_for_status()
-    return response.json()
+    r = requests.get(url)
+    json_data = r.json()
+    
+    # Create DataFrames
+    elements_df = pd.DataFrame(json_data['elements'])
+    teams_df = pd.DataFrame(json_data['teams'])
+    
+    # Map Team Names (The ID in elements matches ID in teams)
+    team_id_to_name = teams_df.set_index('id')['name'].to_dict()
+    elements_df['team_name'] = elements_df['team'].map(team_id_to_name)
+    
+    # Calculate Metrics
+    elements_df['cost'] = elements_df['now_cost'] / 10
+    elements_df['ppm'] = elements_df['total_points'] / elements_df['cost']
+    elements_df['ppm'] = elements_df['ppm'].fillna(0)  # Handle zeros
+    
+    # Create Logo URLs (Crucial Step!)
+    # We use the 'team_code' column which is standard in the API
+    elements_df['team_code_str'] = elements_df['team_code'].astype(str).str.zfill(3)
+    elements_df['logo_url'] = (
+        "https://resources.premierleague.com/premierleague/badges/70/t" 
+        + elements_df['team_code_str'] 
+        + ".png"
+    )
+    
+    return elements_df
 
-# Fetch data
-data = fetch_fpl_data()
+# Load the data
+df = load_data()
 
-# Players & Teams DataFrames
-players_df = pd.DataFrame(data['elements'])
-teams_df = pd.DataFrame(data['teams'])
-
-# Prepare teams for merge (get id, name, code)
-teams_df = teams_df.rename(
-    columns={"id": "team_id", "code": "team_code", "name": "team_name"}
-)[["team_id", "team_name", "team_code"]]
-
-# Merge: add team_name and team_code to players
-players = players_df.merge(
-    teams_df,
-    left_on="team",
-    right_on="team_id",
-    how="left"
+# --- 3. SIDEBAR FILTERS ---
+st.sidebar.header("🎯 Scout Filters")
+min_minutes = st.sidebar.slider("Min Minutes Played", 0, 3000, 500)
+max_price = st.sidebar.slider("Max Price (£)", 4.0, 15.0, 15.0)
+positions = st.sidebar.multiselect(
+    "Positions", 
+    ['GKP', 'DEF', 'MID', 'FWD'], 
+    default=['MID', 'FWD']
 )
 
-# Add logo_url column
-players["team_code"] = players["team_code"].astype(str).str.zfill(3)
-players["logo_url"] = (
-    "https://resources.premierleague.com/premierleague/badges/70/t"
-    + players["team_code"]
-    + ".png"
-)
+# Map API position IDs (1=GKP, 2=DEF, 3=MID, 4=FWD)
+pos_map = {1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD'}
+df['position'] = df['element_type'].map(pos_map)
 
-# Add Points Per Million column
-players["Points Per Million"] = players["total_points"] / players["now_cost"]
+# Apply Filters
+filtered_df = df[
+    (df['minutes'] >= min_minutes) &
+    (df['cost'] <= max_price) &
+    (df['position'].isin(positions))
+]
 
-# Compose a player name for tooltips
-players['Name'] = players['first_name'] + " " + players['second_name']
-players['Cost'] = players['now_cost'] / 10
+# --- 4. THE VISUALS ---
 
-# Get position names
-position_map = {row["id"]: row["singular_name"] for row in data["element_types"]}
-players["element_type"] = players["element_type"].map(position_map)
+# Tab Layout
+tab1, tab2 = st.tabs(["📊 Moneyball Chart", "🏆 Dream Team Builder"])
 
-# Streamlit App
-st.set_page_config(page_title="FPL Moneyball Dashboard", layout="wide")
-st.title("FPL Moneyball Dashboard")
+with tab1:
+    st.subheader("Value vs. Performance")
+    
+    # Simple Scatter Plot
+    st.scatter_chart(
+        filtered_df,
+        x='cost',
+        y='total_points',
+        color='position',
+        size='ppm',
+        use_container_width=True
+    )
+    
+    # The Data Table with Images
+    st.subheader("Top Value Picks")
+    display_cols = ['logo_url', 'web_name', 'team_name', 'position', 'cost', 'total_points', 'ppm']
+    
+    st.dataframe(
+        filtered_df[display_cols].sort_values('ppm', ascending=False).head(50),
+        column_config={
+            "logo_url": st.column_config.ImageColumn("Club", width="small"),
+            "ppm": st.column_config.NumberColumn("Points per Million", format="%.2f"),
+            "cost": st.column_config.NumberColumn("Price", format="£%.1f"),
+        },
+        use_container_width=True,
+        hide_index=True
+    )
 
-# Scatter plot (Cost vs Points) by Position
-scatter = alt.Chart(players).mark_circle(size=90).encode(
-    x=alt.X("Cost:Q", title="Price (£m)"),
-    y=alt.Y("total_points:Q", title="Total Points"),
-    color=alt.Color("element_type:N", title="Position"),
-    tooltip=[
-        alt.Tooltip("Name:N", title="Player"),
-        alt.Tooltip("team_name:N", title="Team"),
-        alt.Tooltip("total_points:Q", title="Points"),
-        alt.Tooltip("Cost:Q", title="Cost (£m)")
-    ],
-).interactive().properties(
-    width=780,
-    height=480,
-    title="Player Cost vs Total Points (by Position)"
-)
-st.altair_chart(scatter, use_container_width=True)
+with tab2:
+    st.subheader("🤖 Auto-Pick Dream Team")
+    
+    budget = st.slider("Team Budget (£m)", 80.0, 105.0, 100.0)
+    formation = st.selectbox("Formation", ["3-4-3", "3-5-2", "4-4-2", "4-3-3"])
+    
+    if st.button("Generate Team"):
+        # Parse formation
+        defs, mids, fwds = map(int, formation.split("-"))
+        gkps = 1
+        
+        # Simple Greedy Algorithm
+        dream_team = []
+        current_cost = 0
+        
+        # Helper function to pick best players
+        def pick_best(pos_name, count, current_team):
+            available = df[df['position'] == pos_name].sort_values('total_points', ascending=False)
+            picked = []
+            for _, player in available.iterrows():
+                if len(picked) < count:
+                    picked.append(player)
+            return picked
 
-# Show top 50 by Points Per Million
-st.subheader("Top 50 Players by Points Per Million (£m)")
-top_ppm = players.sort_values("Points Per Million", ascending=False).head(50).copy()
-
-to_show = top_ppm[[
-    "Name", "element_type", "team_name", "Cost",
-    "total_points", "Points Per Million", "logo_url"
-]].rename(
-    columns={
-        "element_type": "Position",
-        "team_name": "Team",
-        "total_points": "Points"
-    }
-)
-
-st.dataframe(
-    to_show,
-    use_container_width=True,
-    column_config={
-        "logo_url": st.column_config.ImageColumn("Badge", help="Club Badge"),
-        "Points Per Million": st.column_config.NumberColumn(format="%.2f"),
-        "Cost": st.column_config.NumberColumn(format="%.1f"),
-    }
-)
+        # Pick the squad
+        squad = []
+        squad += pick_best('GKP', gkps, squad)
+        squad += pick_best('DEF', defs, squad)
+        squad += pick_best('MID', mids, squad)
+        squad += pick_best('FWD', fwds, squad)
+        
+        squad_df = pd.DataFrame(squad)
+        
+        # Display
+        total_points = squad_df['total_points'].sum()
+        total_cost = squad_df['cost'].sum()
+        
+        col1, col2 = st.columns(2)
+        col1.metric("Projected Points", int(total_points))
+        col2.metric("Total Cost", f"£{total_cost:.1f}m", delta=f"{budget - total_cost:.1f}m left")
+        
+        st.dataframe(
+            squad_df[['web_name', 'position', 'team_name', 'total_points', 'cost']],
+            use_container_width=True
+        )
